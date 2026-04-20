@@ -44,6 +44,9 @@ internal static class CodexCliHandler
     {
         var escapedPrompt = EscapeCommandArgument(prompt);
         var outputFilePath = Path.Combine(Path.GetTempPath(), "codex_bug_description_" + Guid.NewGuid().ToString("N") + ".txt");
+        var promptFilePath = useStdin
+            ? Path.Combine(Path.GetTempPath(), "codex_prompt_" + Guid.NewGuid().ToString("N") + ".txt")
+            : null;
         var projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
         var codexExecutablePath = ResolveCodexExecutablePath();
         try
@@ -60,12 +63,27 @@ internal static class CodexCliHandler
                 : "exec --output-last-message \"" + outputFilePath + "\" --skip-git-repo-check --sandbox read-only \"" + escapedPrompt + "\"";
             var fileName = codexExecutablePath;
             var extension = Path.GetExtension(codexExecutablePath);
+            var usePromptFileRedirection = false;
+
+            if (useStdin && !string.IsNullOrWhiteSpace(promptFilePath))
+            {
+                var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+                await File.WriteAllTextAsync(promptFilePath, prompt ?? string.Empty, utf8);
+            }
 
             if (string.Equals(extension, ".cmd", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(extension, ".bat", StringComparison.OrdinalIgnoreCase))
             {
                 fileName = "cmd.exe";
-                arguments = "/d /s /c \"\"" + codexExecutablePath + "\" " + arguments + "\"";
+                if (useStdin && !string.IsNullOrWhiteSpace(promptFilePath))
+                {
+                    arguments = "/d /s /c \"\"" + codexExecutablePath + "\" " + arguments + " < \"" + promptFilePath + "\"\"";
+                    usePromptFileRedirection = true;
+                }
+                else
+                {
+                    arguments = "/d /s /c \"\"" + codexExecutablePath + "\" " + arguments + "\"";
+                }
             }
 
             var startInfo = new ProcessStartInfo
@@ -74,7 +92,7 @@ internal static class CodexCliHandler
                 Arguments = arguments,
                 WorkingDirectory = projectRoot,
                 UseShellExecute = false,
-                RedirectStandardInput = useStdin,
+                RedirectStandardInput = useStdin && !usePromptFileRedirection,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
@@ -86,10 +104,9 @@ internal static class CodexCliHandler
             if (process == null)
                 throw new InvalidOperationException("Failed to start codex CLI process.");
 
-            if (useStdin)
+            if (useStdin && !usePromptFileRedirection)
             {
-                await process.StandardInput.WriteAsync(prompt ?? string.Empty);
-                process.StandardInput.Close();
+                await WriteUtf8ToStandardInputAsync(process, prompt ?? string.Empty);
             }
 
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
@@ -127,6 +144,8 @@ internal static class CodexCliHandler
             {
                 if (File.Exists(outputFilePath))
                     File.Delete(outputFilePath);
+                if (!string.IsNullOrWhiteSpace(promptFilePath) && File.Exists(promptFilePath))
+                    File.Delete(promptFilePath);
             }
             catch
             {
@@ -287,5 +306,14 @@ internal static class CodexCliHandler
             .Replace("\r", " ")
             .Replace("\n", " ")
             .Replace("\"", "\\\"");
+    }
+
+    private static async Task WriteUtf8ToStandardInputAsync(Process process, string value)
+    {
+        var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        var bytes = utf8.GetBytes(value ?? string.Empty);
+        await process.StandardInput.BaseStream.WriteAsync(bytes, 0, bytes.Length);
+        await process.StandardInput.BaseStream.FlushAsync();
+        process.StandardInput.Close();
     }
 }
