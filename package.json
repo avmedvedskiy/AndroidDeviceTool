@@ -1,0 +1,14 @@
+{
+  "name": "com.avmedvedskiy.scrspy",
+  "displayName": "Editor.Android Scrspy Tool",
+  "version": "0.0.1",
+  "unity": "2021.3",
+  "author": "avmedvedskiy",
+  "description": "Install selected APK via adb and run scrcpy",
+  "keywords": [
+    "android",
+    "adb",
+    "scrcpy",
+    "editor"
+  ]
+}
