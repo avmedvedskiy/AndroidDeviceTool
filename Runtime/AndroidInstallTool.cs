@@ -47,6 +47,8 @@ public static class AndroidInstallTool
         {
             Debug.Log("Using APK: " + apkPath);
             Debug.Log("Resolved package name: " + packageName);
+            SettingsStorage.SetLastBundleName(packageName);
+            SettingsStorage.AddBundleNameHistory(packageName);
 
             adbHandler.StartServer();
             adbHandler.WaitForDevice();

@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
+using UnityEditor.UIElements;
 using UnityEngine;
 using UnityEngine.UIElements;
 using Debug = UnityEngine.Debug;
@@ -19,13 +20,16 @@ internal sealed class AndroidInstallWindow : EditorWindow
     private const float MinWindowWidth = 520f;
     private const float MinWindowHeight = 395f;
     private const float DeviceViewportMinHeight = 208f;
+    private const double SessionProcessPollIntervalSeconds = 0.5d;
+    private const string BundleAllOption = "ALL";
 
     private readonly List<DeviceSelection> _deviceSelections = new List<DeviceSelection>();
     private readonly Dictionary<string, SessionRuntimeState> _sessionsByDeviceId = new Dictionary<string, SessionRuntimeState>();
     private readonly Dictionary<string, string> _selectedSessionDirectoryByDeviceId = new Dictionary<string, string>();
 
     private TextField _apkPathField;
-    private TextField _bundleNameField;
+    private PopupField<string> _bundleNameDropdown;
+    private Button _editBundleNamesButton;
     private ScrollView _devicesScrollView;
     private VisualElement _deviceCardsContainer;
     private Button _installButton;
@@ -33,6 +37,7 @@ internal sealed class AndroidInstallWindow : EditorWindow
 
     private string _selectedApkPath;
     private string _bundleName;
+    private double _nextSessionProcessPollTime;
 
     [MenuItem(MenuPath)]
     private static void Open()
@@ -50,6 +55,12 @@ internal sealed class AndroidInstallWindow : EditorWindow
         }
     }
 
+    private void OnEnable()
+    {
+        EditorApplication.update -= PollFinishedSessions;
+        EditorApplication.update += PollFinishedSessions;
+    }
+
     public void CreateGUI()
     {
         BuildLayout();
@@ -60,6 +71,7 @@ internal sealed class AndroidInstallWindow : EditorWindow
 
     private void OnDisable()
     {
+        EditorApplication.update -= PollFinishedSessions;
         StopAllSessions();
     }
 
@@ -109,10 +121,26 @@ internal sealed class AndroidInstallWindow : EditorWindow
         bundleLabel.style.marginBottom = 4f;
         root.Add(bundleLabel);
 
-        _bundleNameField = new TextField();
-        _bundleNameField.style.marginBottom = 8f;
-        _bundleNameField.RegisterValueChangedCallback(evt => SetBundleName(evt.newValue, persistAsLastBundleName: true));
-        root.Add(_bundleNameField);
+        var bundleRow = new VisualElement();
+        bundleRow.style.flexDirection = FlexDirection.Row;
+        bundleRow.style.alignItems = Align.Center;
+        bundleRow.style.marginBottom = 8f;
+
+        _bundleNameDropdown = new PopupField<string>(BuildBundleNameOptions(), 0);
+        _bundleNameDropdown.style.flexGrow = 1f;
+        _bundleNameDropdown.style.flexShrink = 1f;
+        _bundleNameDropdown.style.minWidth = 0f;
+        _bundleNameDropdown.style.marginRight = 8f;
+        _bundleNameDropdown.RegisterValueChangedCallback(evt => SetBundleName(evt.newValue, persistAsLastBundleName: true));
+        bundleRow.Add(_bundleNameDropdown);
+
+        _editBundleNamesButton = new Button(OpenBundleNamesEditor) { text = "Edit" };
+        _editBundleNamesButton.style.width = 70f;
+        _editBundleNamesButton.style.flexShrink = 0f;
+        bundleRow.Add(_editBundleNamesButton);
+        RefreshBundleNameOptions();
+
+        root.Add(bundleRow);
 
         var devicesHeaderRow = new VisualElement();
         devicesHeaderRow.style.flexDirection = FlexDirection.Row;
@@ -196,49 +224,56 @@ internal sealed class AndroidInstallWindow : EditorWindow
 
     private void SetBundleName(string bundleName, bool persistAsLastBundleName)
     {
-        var normalized = string.IsNullOrWhiteSpace(bundleName) ? null : bundleName.Trim();
+        var normalized = string.IsNullOrWhiteSpace(bundleName) || string.Equals(bundleName, BundleAllOption, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : bundleName.Trim();
         _bundleName = normalized;
-        _bundleNameField.SetValueWithoutNotify(_bundleName ?? string.Empty);
 
-        if (persistAsLastBundleName && !string.IsNullOrWhiteSpace(_bundleName))
+        if (_bundleNameDropdown != null)
+        {
+            var selectedValue = string.IsNullOrWhiteSpace(_bundleName) ? BundleAllOption : _bundleName;
+            if (!_bundleNameDropdown.choices.Contains(selectedValue))
+                RefreshBundleNameOptions();
+            _bundleNameDropdown.SetValueWithoutNotify(selectedValue);
+        }
+
+        if (persistAsLastBundleName)
             SettingsStorage.SetLastBundleName(_bundleName);
     }
 
     private void RestoreBundleName()
     {
         var bundleName = SettingsStorage.GetLastBundleName();
-        if (string.IsNullOrWhiteSpace(bundleName))
-            bundleName = GetProjectBundleName();
-
         SetBundleName(bundleName, persistAsLastBundleName: true);
     }
 
-    private static string GetProjectBundleName()
+    internal void RefreshBundleNameOptions()
     {
-        var current = PlayerSettings.applicationIdentifier;
-        if (!string.IsNullOrWhiteSpace(current))
-            return current.Trim();
+        if (_bundleNameDropdown == null)
+            return;
 
-        var company = SanitizeBundleToken(PlayerSettings.companyName);
-        var product = SanitizeBundleToken(PlayerSettings.productName);
-        return company + "." + product;
+        _bundleNameDropdown.choices = BuildBundleNameOptions();
+        var selectedValue = string.IsNullOrWhiteSpace(_bundleName) ? BundleAllOption : _bundleName;
+        if (!_bundleNameDropdown.choices.Contains(selectedValue))
+        {
+            _bundleName = null;
+            selectedValue = BundleAllOption;
+            SettingsStorage.SetLastBundleName(null);
+        }
+
+        _bundleNameDropdown.SetValueWithoutNotify(selectedValue);
     }
 
-    private static string SanitizeBundleToken(string value)
+    private void OpenBundleNamesEditor()
     {
-        if (string.IsNullOrWhiteSpace(value))
-            return "app";
+        BundleNameHistoryWindow.Open(this);
+    }
 
-        var token = new string(value
-            .ToLowerInvariant()
-            .Select(ch => char.IsLetterOrDigit(ch) ? ch : '.')
-            .ToArray());
-
-        token = token.Trim('.');
-        while (token.Contains(".."))
-            token = token.Replace("..", ".");
-
-        return string.IsNullOrWhiteSpace(token) ? "app" : token;
+    private static List<string> BuildBundleNameOptions()
+    {
+        var options = new List<string> { BundleAllOption };
+        options.AddRange(SettingsStorage.GetBundleNameHistory());
+        return options;
     }
 
     private void RefreshDeviceList()
@@ -463,11 +498,14 @@ internal sealed class AndroidInstallWindow : EditorWindow
         actionRowBottom.style.flexDirection = FlexDirection.Row;
         actionRowBottom.style.alignItems = Align.Center;
 
-        var reportBugButton = new Button(() => OpenBugReportForDevice(cardData.Device)) { text = "Stop And Report" };
-        reportBugButton.style.height = 26f;
-        reportBugButton.style.flexGrow = 1f;
-        reportBugButton.style.marginRight = 6f;
-        actionRowBottom.Add(reportBugButton);
+        var logsButton = new Button(() => OpenLogsForDevice(cardData.Device))
+        {
+            text = sessionRunning ? "Stop And Open Logs" : "Open Logs"
+        };
+        logsButton.style.height = 26f;
+        logsButton.style.flexGrow = 1f;
+        logsButton.style.marginRight = 6f;
+        actionRowBottom.Add(logsButton);
 
         var screenshotButton = CreateScreenshotButton(() => CaptureScreenshotForDevice(cardData.Device));
         actionRowBottom.Add(screenshotButton);
@@ -551,6 +589,7 @@ internal sealed class AndroidInstallWindow : EditorWindow
                 paths,
                 logcatProcess,
                 scrcpyProcess);
+            _selectedSessionDirectoryByDeviceId[device.Id] = paths.SessionDirectory;
             message = "Session started: " + paths.SessionDirectory;
             Debug.Log("Session started for " + device.DisplayName + ". Folder: " + paths.SessionDirectory);
         }
@@ -581,42 +620,31 @@ internal sealed class AndroidInstallWindow : EditorWindow
         }
     }
 
-    private void OpenBugReportForDevice(AdbDeviceInfo device)
+    private void OpenLogsForDevice(AdbDeviceInfo device)
     {
-        if (!ScrSpyHandler.TryGetToolPaths(out var workingDirectory, out var adbPath, out _, out var resolveError))
-        {
-            SetStatus(resolveError, isError: true);
-            return;
-        }
-
         try
         {
             if (_sessionsByDeviceId.TryGetValue(device.Id, out var sessionState) && sessionState.ScrcpyProcess != null && !sessionState.ScrcpyProcess.HasExited)
             {
-                StopAndFinalizeSession(device.Id, sessionState, logSummary: true);
+                StopAndFinalizeSession(device.Id, sessionState, logSummary: true, openSessionFolder: true);
                 RefreshDeviceList();
-
-                _selectedSessionDirectoryByDeviceId[device.Id] = sessionState.Paths.SessionDirectory;
-                var screenshotPath = TryFindLatestScreenshotPath(sessionState.Paths.SessionDirectory);
-                BugReportWindow.Open(screenshotPath, sessionState.Paths.SessionDirectory);
-                SetStatus("Session stopped and bug report opened for " + device.DisplayName, isError: false);
                 return;
             }
 
-            var selectedSessionDirectory = PromptAndRememberSessionDirectory(device);
-            if (string.IsNullOrWhiteSpace(selectedSessionDirectory))
+            if (_selectedSessionDirectoryByDeviceId.TryGetValue(device.Id, out var rememberedDirectory) && Directory.Exists(rememberedDirectory))
             {
-                SetStatus("Session folder selection canceled.", isError: false);
+                OpenFolderPath(rememberedDirectory);
+                SetStatus("Opened logs folder: " + rememberedDirectory, isError: false);
                 return;
             }
 
-            var screenshotPathFromFolder = TryFindLatestScreenshotPath(selectedSessionDirectory);
-            BugReportWindow.Open(screenshotPathFromFolder, selectedSessionDirectory);
-            SetStatus("Bug report opened using selected session folder.", isError: false);
+            var deviceDirectory = SessionCaptureStorage.GetDeviceSessionsDirectory(device, createIfMissing: true);
+            OpenFolderPath(deviceDirectory);
+            SetStatus("Opened sessions folder: " + device.DisplayName, isError: false);
         }
         catch (Exception exception)
         {
-            SetStatus("Failed to open bug report: " + exception.Message, isError: true);
+            SetStatus("Failed to open logs folder: " + exception.Message, isError: true);
         }
     }
 
@@ -734,39 +762,6 @@ internal sealed class AndroidInstallWindow : EditorWindow
         return null;
     }
 
-    private string PromptAndRememberSessionDirectory(AdbDeviceInfo device)
-    {
-        var initialDirectory = string.Empty;
-        if (_selectedSessionDirectoryByDeviceId.TryGetValue(device.Id, out var rememberedDirectory) && Directory.Exists(rememberedDirectory))
-        {
-            initialDirectory = rememberedDirectory;
-        }
-        else
-        {
-            initialDirectory = SessionCaptureStorage.GetDeviceSessionsDirectory(device, createIfMissing: true);
-        }
-
-        var selectedDirectory = EditorUtility.OpenFolderPanel("Select session folder for " + device.DisplayName, initialDirectory, string.Empty);
-        if (string.IsNullOrWhiteSpace(selectedDirectory))
-            return null;
-
-        _selectedSessionDirectoryByDeviceId[device.Id] = selectedDirectory;
-        return selectedDirectory;
-    }
-
-    private static string TryFindLatestScreenshotPath(string sessionDirectory)
-    {
-        if (string.IsNullOrWhiteSpace(sessionDirectory) || !Directory.Exists(sessionDirectory))
-            return null;
-
-        var screenshots = Directory.GetFiles(sessionDirectory, "*.png")
-            .Select(path => new FileInfo(path))
-            .OrderByDescending(file => file.LastWriteTimeUtc)
-            .ToArray();
-
-        return screenshots.Length == 0 ? null : screenshots[0].FullName;
-    }
-
     private static string GetUniqueFilePath(string directory, string baseName, string extension)
     {
         var initialPath = Path.Combine(directory, baseName + extension);
@@ -792,7 +787,7 @@ internal sealed class AndroidInstallWindow : EditorWindow
             return;
         }
 
-        StopAndFinalizeSession(device.Id, sessionState, logSummary: true);
+        StopAndFinalizeSession(device.Id, sessionState, logSummary: true, openSessionFolder: true);
         RefreshDeviceList();
     }
 
@@ -872,17 +867,60 @@ internal sealed class AndroidInstallWindow : EditorWindow
         });
     }
 
+    private void PollFinishedSessions()
+    {
+        if (_sessionsByDeviceId.Count == 0)
+            return;
+
+        var now = EditorApplication.timeSinceStartup;
+        if (now < _nextSessionProcessPollTime)
+            return;
+
+        _nextSessionProcessPollTime = now + SessionProcessPollIntervalSeconds;
+
+        string finishedDeviceId = null;
+        SessionRuntimeState finishedState = default(SessionRuntimeState);
+        foreach (var pair in _sessionsByDeviceId)
+        {
+            var scrcpyProcess = pair.Value.ScrcpyProcess;
+            if (scrcpyProcess == null)
+                continue;
+
+            try
+            {
+                if (!scrcpyProcess.HasExited)
+                    continue;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("Failed to inspect scrcpy process state: " + ex.Message);
+                continue;
+            }
+
+            finishedDeviceId = pair.Key;
+            finishedState = pair.Value;
+            break;
+        }
+
+        if (string.IsNullOrWhiteSpace(finishedDeviceId))
+            return;
+
+        Debug.Log("scrcpy closed for " + finishedState.Device.DisplayName + ". Finalizing session.");
+        StopAndFinalizeSession(finishedDeviceId, finishedState, logSummary: true, openSessionFolder: true);
+        RefreshDeviceList();
+    }
+
     private void StopAllSessions()
     {
         var sessionIds = _sessionsByDeviceId.Keys.ToArray();
         foreach (var sessionId in sessionIds)
         {
             if (_sessionsByDeviceId.TryGetValue(sessionId, out var state))
-                StopAndFinalizeSession(sessionId, state, logSummary: false);
+                StopAndFinalizeSession(sessionId, state, logSummary: false, openSessionFolder: false);
         }
     }
 
-    private void StopAndFinalizeSession(string deviceId, SessionRuntimeState state, bool logSummary)
+    private void StopAndFinalizeSession(string deviceId, SessionRuntimeState state, bool logSummary, bool openSessionFolder)
     {
         string stopScreenshotPath = null;
         TryCaptureStopScreenshot(state, out stopScreenshotPath);
@@ -895,11 +933,27 @@ internal sealed class AndroidInstallWindow : EditorWindow
 
         var summary = BuildSessionSummary(state, stopScreenshotPath);
         TryWriteSummaryFile(state.Paths.SessionDirectory, summary);
+        _selectedSessionDirectoryByDeviceId[deviceId] = state.Paths.SessionDirectory;
+
+        if (openSessionFolder)
+        {
+            try
+            {
+                OpenFolderPath(state.Paths.SessionDirectory);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("Failed to open session folder: " + ex.Message);
+            }
+        }
 
         if (logSummary)
         {
             Debug.Log(summary);
-            SetStatus("Session stopped. Folder: " + state.Paths.SessionDirectory, isError: false);
+            var statusMessage = openSessionFolder
+                ? "Session stopped. Opened logs folder: " + state.Paths.SessionDirectory
+                : "Session stopped. Folder: " + state.Paths.SessionDirectory;
+            SetStatus(statusMessage, isError: false);
         }
 
         _sessionsByDeviceId.Remove(deviceId);
@@ -1004,6 +1058,8 @@ internal sealed class AndroidInstallWindow : EditorWindow
             return;
         }
 
+        SettingsStorage.AddBundleNameHistory(packageName);
+        RefreshBundleNameOptions();
         SetBundleName(packageName, persistAsLastBundleName: true);
 
         if (!ScrSpyHandler.TryGetToolPaths(out var workingDirectory, out var adbPath, out var scrcpyPath, out var resolveError))

@@ -7,7 +7,7 @@ internal static class SessionCaptureStorage
     private const string ReportsRootFolderName = "SessionCaptures";
     private const string LogFileName = "log.txt";
     private const string UnityLogFileName = "log_unity.txt";
-    private const string VideoFileName = "video.mkv";
+    private const string VideoFileName = "video.mp4";
 
     public static SessionCapturePaths CreateSessionPaths(AdbDeviceInfo device, DateTime? sessionStartLocalTime = null)
     {
