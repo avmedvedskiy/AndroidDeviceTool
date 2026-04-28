@@ -56,7 +56,7 @@
 В папке сессии могут появляться файлы:
 - `log.txt`
 - `log_unity.txt`
-- `video.mp4`
+- `video.mkv`
 - `summary.txt`
 - `screenshot*.png`
 
